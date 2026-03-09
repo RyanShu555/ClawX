@@ -5,6 +5,8 @@
 import { app } from 'electron';
 import path from 'path';
 import { EventEmitter } from 'events';
+
+import { promises as fs } from 'fs';
 import WebSocket from 'ws';
 import { PORTS } from '../utils/config';
 import { JsonRpcNotification, isNotification, isResponse } from './protocol';
@@ -154,6 +156,120 @@ export class GatewayManager extends EventEmitter {
   getStatus(): GatewayStatus {
     return this.stateController.getStatus();
   }
+  /**
+   * Get the PID file path for the current user's Gateway process.
+   * Each user has their own PID file in their config directory.
+   */
+  private getPIdFilePath(): string {
+    return path.join(app.getPath('userData'), 'gateway.pid');
+  }
+
+  /**
+   * Get the process title for the current user's Gateway process.
+   * Used for Windows task manager identification.
+   */
+  private getProcessTitle(): string {
+    const userId = process.env.USERNAME || process.env.USER || 'default';
+    return `ClawX-Gateway-${userId}`;
+  }
+
+  /**
+   * Write the Gateway process PID to the PID file.
+   * This is called immediately after the Gateway process spawns successfully.
+   */
+  private async writePidFile(pid: number): Promise<void> {
+    try {
+      const pidFile = this.getPIdFilePath();
+      await fs.writeFile(pidFile, String(pid), 'utf-8');
+      logger.debug(`Gateway PID ${pid} written to ${pidFile}`);
+    } catch (err) {
+      logger.warn('Failed to write PID file:', err);
+    }
+  }
+
+  /**
+   * Read the current user's PID file to get the last known Gateway PID.
+   * Returns null if the file doesn't exist or contains invalid data.
+   */
+  private async readPidFile(): Promise<number | null> {
+    try {
+      const pidFile = this.getPIdFilePath();
+      const content = await fs.readFile(pidFile, 'utf-8');
+      const pid = parseInt(content.trim(), 10);
+      if (isNaN(pid)) {
+        logger.warn(`PID file contains invalid data: ${content}`);
+        return null;
+      }
+      return pid;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        logger.warn('Failed to read PID file:', err);
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Clear the PID file (remove it).
+   * Called when Gateway stops or before starting a new Gateway.
+   */
+  private async clearPidFile(): Promise<void> {
+    try {
+      const pidFile = this.getPIdFilePath();
+      await fs.unlink(pidFile);
+      logger.debug(`PID file cleared: ${pidFile}`);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        logger.warn('Failed to clear PID file:', err);
+      }
+      // Ignore if file doesn't exist (idempotent operation)
+    }
+  }
+
+  /**
+   * Check if a process with the given PID is still alive.
+   * Uses process.kill(pid, 0) which doesn't actually send a signal,
+   * just checks if the process exists.
+   */
+  private isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Check if a process listening on the given port is likely an orphaned process
+   * (i.e., the process is no longer responding to WebSocket connections).
+   * This is used when we don't have a PID file and need to determine if it's safe
+   * to kill the process on the port.
+   */
+  private async isLikelyOrphanedProcess(port: number): Promise<boolean> {
+    try {
+      const connected = await new Promise<boolean>((resolve) => {
+        const testWs = new WebSocket(`ws://localhost:${port}/ws`);
+        const timeout = setTimeout(() => {
+          testWs.close();
+          resolve(false); // Timeout means likely orphaned
+        }, 500); // Short timeout - if it doesn't respond quickly, it's probably dead
+        testWs.on('open', () => {
+          clearTimeout(timeout);
+          testWs.close();
+          resolve(true); // Still responding
+        });
+        testWs.on('error', () => {
+          clearTimeout(timeout);
+          resolve(false); // Can't connect - orphaned
+        });
+      });
+      return !connected; // Return true if orphaned (not responding)
+    } catch {
+      return true; // Error means likely orphaned
+    }
+  }
+
 
   /**
    * Check if Gateway is connected and ready
@@ -314,6 +430,9 @@ export class GatewayManager extends EventEmitter {
     if (this.process && this.ownsProcess) {
       const child = this.process;
       await terminateOwnedGatewayProcess(child);
+
+    // Clear PID file when Gateway exits (multi-user isolation)
+    await this.clearPidFile().catch(err => logger.warn('Failed to clear PID file:', err));
 
       if (this.process === child) {
         this.process = null;
@@ -577,6 +696,9 @@ export class GatewayManager extends EventEmitter {
         logger.warn(`[Gateway stderr] ${classified.normalized}`);
       },
       onSpawn: (pid) => {
+        if (pid) {
+          this.writePidFile(pid).catch(err => logger.warn('Failed to write PID file:', err));
+        }
         this.setStatus({ pid });
       },
       onExit: (exitedChild, code) => {

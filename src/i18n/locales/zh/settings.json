@@ -112,6 +112,8 @@
     "description": "OpenClaw 网关设置",
     "status": "状态",
     "port": "端口",
+    "portConfig": "Gateway 端口",
+    "portConfigDesc": "OpenClaw Gateway 端口（默认：18789）。重启 Gateway 以应用更改。",
     "logs": "日志",
     "appLogs": "应用日志",
     "openFolder": "打开文件夹",

@@ -111,6 +111,8 @@
     "description": "OpenClaw ゲートウェイ設定",
     "status": "ステータス",
     "port": "ポート",
+    "portConfig": "Gateway ポート",
+    "portConfigDesc": "OpenClaw Gateway のポート（デフォルト: 18789）。変更を適用するには Gateway を再起動してください。",
     "logs": "ログ",
     "appLogs": "アプリケーションログ",
     "openFolder": "フォルダーを開く",
